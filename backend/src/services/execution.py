@@ -1,5 +1,6 @@
 import logging
 from datetime import date, timedelta
+from pathlib import Path
 from sqlalchemy import and_, or_, select
 from src.config.database import Session
 from src.constants.enums import Status
@@ -8,10 +9,12 @@ from src.domain.spec import SPEC
 from src.models.jobs import Delivery, Run, Schedule
 from src.models.source import Dataset
 from src.services.audit import record
+from src.services.probability import ProbabilityResolver
 from src.utils.exports import write_report
 from src.utils.time import now
 
 log = logging.getLogger(__name__)
+HEARTBEAT_PATH = Path('/tmp/analysis-heartbeat')
 
 
 def materialize_due():
@@ -58,14 +61,34 @@ def claim():
         job.attempt += 1
         job.lease_until = stamp + timedelta(minutes=3)
         records = db.get(Dataset, job.dataset_id).rows
-        return job.id, job.attempt, records, job.params
+        return job.id, job.attempt, records, job.params, job.dataset_id, job.params['humidity_threshold']
+
+
+def _touch_heartbeat():
+    try:
+        HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        HEARTBEAT_PATH.touch()
+    except OSError:
+        log.warning('无法写入心跳文件 %s', HEARTBEAT_PATH)
 
 
 def execute(lease):
-    job_id, attempt, rows, params = lease
+    job_id, attempt, rows, params, dataset_id, humidity_threshold = lease
     result = export = failure = None
+
+    def progress(pattern_key, p_value, cached_hit):
+        # 每处理完一个模式就续约并刷新心跳；已算过的概率在中断重跑时直接命中缓存。
+        _ = pattern_key, p_value, cached_hit
+        _touch_heartbeat()
+        stamp = now()
+        with Session.begin() as db:
+            job = db.get(Run, job_id, with_for_update=True)
+            if job and job.status == Status.RUNNING and job.attempt == attempt:
+                job.lease_until = stamp + timedelta(minutes=3)
+
+    resolver = ProbabilityResolver(dataset_id, humidity_threshold, progress=progress)
     try:
-        result = analyze(rows, params)
+        result = analyze(rows, params, resolver=resolver)
         export = write_report(job_id, attempt, result)
     except ValueError as error:
         failure = str(error)[:500]
@@ -82,7 +105,8 @@ def execute(lease):
         job.result = None if failure else result
         job.export_file = export
         job.error = failure
-        record(db, 'worker', f'analysis.{job.status}', job.id, attempt=attempt, reason=failure)
+        record(db, 'worker', f'analysis.{job.status}', job.id, attempt=attempt, reason=failure,
+               probability_cache_hits=resolver.hits, probability_cache_misses=resolver.misses)
         if job.schedule_id:
             plan = db.get(Schedule, job.schedule_id)
             ready = not failure and result.get('ready', True)

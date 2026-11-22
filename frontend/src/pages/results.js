@@ -8,6 +8,25 @@ import {workspace} from '../stores/workspace.js';
 import {button, el, h, link, p} from '../utils/dom.js';
 import {date, value} from '../utils/format.js';
 
+const PROBABILITY_KEYS = new Set(['p_value', 'adjusted_p']);
+const probabilityText = input => input === null || input === undefined ? '—'
+  : input < 0.000001 ? input.toExponential(2) : input.toFixed(6);
+
+function renderColumn(column) {
+  if (PROBABILITY_KEYS.has(column.key)) {
+    return {...column, render: row => probabilityText(row[column.key])};
+  }
+  if (column.key === 'listed') {
+    return {...column, render: row => row.listed ? '是' : '否'};
+  }
+  return column;
+}
+
+function resultTable(item) {
+  const pageSize = item.title === '各库房每日两组人数与命中核对' ? 24 : 12;
+  return table(item.columns.map(renderColumn), item.rows, {caption: item.title, pageSize});
+}
+
 export async function results(route, refresh) {
   const {spec,runs,datasets} = workspace;
   const id = route.id || runs[0]?.id;
@@ -18,7 +37,7 @@ export async function results(route, refresh) {
   const finished = item => item.status === 'complete' || item.status === 'failed';
   if (!finished(job)) {
     const original = location.hash;
-    const status = el('p',{role:'status'},'后台正在计算，完成后会自动展示。');
+    const status = el('p',{role:'status'},'后台正在计算，完成后会自动展示。中断续跑会复用已算过的概率。');
     poll(()=>workspace.getRun(id),finished,()=>location.hash===original)
       .then(result=>{if (result && status.isConnected && location.hash===original) refresh();
         else if(status.isConnected) status.textContent='仍在执行，请点击刷新检查。';})
@@ -37,7 +56,7 @@ export async function results(route, refresh) {
     metrics(result.metrics),
     result.charts.map(plot),
     (result.sections || []).map(item=>panel(item.title,p(item.text))),
-    result.tables.map(item=>panel(item.title,table(item.columns,item.rows,{caption:item.title}))))
+    result.tables.map(resultTable))
     : panel(job.name,pill(STATUS[job.status],job.status),p(job.error,'feedback'),link('返回调整参数',`#run/${job.dataset_id}`,{class:'quiet'}));
   const inputs = spec.params.map(param=>el('div',{},el('dt',{},param.label),el('dd',{},value(job.params[param.key]))));
   return el('div',{},el('div',{class:'two-col'},el('div',{class:'wide-panel'},analysis),

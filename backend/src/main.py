@@ -7,6 +7,7 @@ from src.config.database import Base, engine
 from src.config.settings import SEED_DEMO
 from src.domain.spec import SPEC
 from src.middlewares import errors, headers, rate
+from src.models import all_models
 from src.routes import distribution, identity, registry, runs
 from src.utils.wakeup import broker
 
@@ -15,7 +16,7 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_app):
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, tables=[model.__table__ for model in all_models])
     if SEED_DEMO:
         try:
             log.info('Seeded %s', seed())
